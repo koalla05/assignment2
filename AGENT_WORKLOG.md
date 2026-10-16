@@ -7,6 +7,8 @@ Do not paste secrets or an unreviewed raw transcript.
 | --- | --- | --- | --- | --- |
 | 2026-10-16 | Claude Code (Claude Sonnet 5.5) | Reviewed the repo and explained the assignment steps. | Accepted as orientation; I read TASKS_AND_GRADES.md myself. | Conversation only. |
 | 2026-10-16 | Claude Code (Claude Sonnet 5.5) | Wrote PLAN.md from my own notes on scheduling, ordering, errors and unstarted jobs. | Revised: it corrected three of my assumptions. I do not need a queue, because an array plus a next-index counter schedules in order and indexed storage keeps result order. `CancellationError` is thrown by the worker, not created by the processor, and other errors map to `.failed`. Never-started jobs are marked `.cancelled` immediately on cancellation, not handled later. | PLAN.md in git. |
+| 2026-10-16 | Claude Code (Claude Sonnet 5.5) | Reviewed my `init`. | Accepted: `< 0` was a bug because `0` must also throw (`<= 0`), and the limit was never stored. I applied the `guard maximumConcurrency > 0` version and the stored property. | `testZeroMaximumConcurrencyIsRejected` passes. |
+| 2026-10-16 | Claude Code (Claude Sonnet 5.5) | Implemented `process`: duplicate-ID preflight, `withTaskGroup` with a next-index counter and active count, indexed `outcomes` array, a `run` helper mapping outcomes, and cancellation checks via `Task.isCancelled`. | Accepted after asking about `Set.insert(...).inserted`, `Array(repeating:count:)`, `?? .cancelled` (nil only means the job never started; a worker `CancellationError` is stored explicitly) and why `while true` terminates. Cancellation and concurrency-limit behavior are not yet covered by tests. | `swift test`: 5 starter tests pass. |
 
 ## Final review
 
