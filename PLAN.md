@@ -34,6 +34,19 @@ start nothing new, and mark every never-started job `.cancelled`. Jobs that
 completed before cancellation was observed keep their success or failure
 outcome. Cooperative workers that throw `CancellationError` are `.cancelled`.
 
+## Bonus: retry policy
+
+The base scheduling loop moved into a private `schedule(_:execute:)` helper
+that takes a closure producing one job's final outcome. The base `process`
+passes the single-attempt mapping; the retry overload passes a loop over
+attempts `1...maximumAttempts`, so both share validation, the concurrency
+limit, input-order results and cancellation. The attempts run sequentially
+inside one child task, so a retry stays in the job's slot. An ordinary error is
+retried until the last attempt, then `.failed`. `CancellationError` returns
+`.cancelled` at once. A retry is not started once the caller has cancelled
+(the job becomes `.cancelled`), because starting it would be a new worker start.
+`RetryPolicy.init` throws `.nonPositiveMaximumAttempts` for `<= 0`.
+
 ## Milestones
 
 - [x] Validate configuration and all job IDs before starting work.
@@ -41,6 +54,7 @@ outcome. Cooperative workers that throw `CancellationError` are `.cancelled`.
 - [x] Map success, ordinary errors, and cancellation outcomes.
 - [x] Handle caller cancellation and never-started jobs.
 - [x] Add at least six distinct student-authored tests and run `swift test`.
+- [x] Bonus: `RetryPolicy`, `RetryPolicyError` and the retry `process` overload, with tests.
 
 ## Risks and checks
 
@@ -54,4 +68,6 @@ outcome. Cooperative workers that throw `CancellationError` are `.cancelled`.
 | `CancellationError` treated as `.failed`, or an ordinary error stops other jobs | Mix success, ordinary error and `CancellationError` workers; assert each outcome and that later jobs still run. |
 | Queued jobs start after caller cancellation | Cancel the `process` task while jobs are gated; assert unstarted jobs are `.cancelled` and their workers never ran. |
 | Results completed before cancellation are overwritten | Let one job finish, then cancel; assert it keeps `.succeeded`. |
+| Retry attempt numbers wrong, or retries exceed the limit | `AttemptLog` records `job#attempt`; assert `[1, 2, 3]` for a failing job, recovery on attempt 3, and with limit 1 that `b` starts only after `a#2`. |
+| `CancellationError` retried | Worker throws it on attempt 1; assert only attempt 1 ran and the outcome is `.cancelled`. |
 | Worker that ignores cancellation | Not guaranteed by the contract (non-goal); not tested. |

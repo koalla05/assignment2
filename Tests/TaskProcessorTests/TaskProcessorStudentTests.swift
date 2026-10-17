@@ -65,6 +65,22 @@ private actor InvocationLog {
     }
 }
 
+/// Records every (job, attempt) pair in the order workers started.
+private actor AttemptLog {
+    private(set) var entries: [String] = []
+
+    func record(_ job: Job, attempt: Int) {
+        entries.append("\(job.id)#\(attempt)")
+    }
+
+    func attempts(for id: String) -> [Int] {
+        entries.compactMap { entry in
+            let parts = entry.split(separator: "#")
+            return parts[0] == id ? Int(parts[1]) : nil
+        }
+    }
+}
+
 @MainActor
 final class TaskProcessorStudentTests: XCTestCase {
     func testNegativeMaximumConcurrencyIsRejected() {
@@ -377,6 +393,228 @@ final class TaskProcessorStudentTests: XCTestCase {
                 JobResult(id: "a", outcome: .succeeded(1)),
                 JobResult(id: "b", outcome: .succeeded(2)),
                 JobResult(id: "c", outcome: .succeeded(3))
+            ]
+        )
+    }
+
+    // MARK: - Retry extension
+
+    func testRetryPolicyRejectsNonPositiveAttempts() {
+        for attempts in [0, -1] {
+            XCTAssertThrowsError(try RetryPolicy(maximumAttempts: attempts)) { error in
+                XCTAssertEqual(error as? RetryPolicyError, .nonPositiveMaximumAttempts)
+            }
+        }
+        XCTAssertEqual(try RetryPolicy(maximumAttempts: 1).maximumAttempts, 1)
+    }
+
+    func testRetryStopsAfterFinalAttemptAndReportsFailed() async throws {
+        // Arrange
+        let processor = try TaskProcessor(maximumConcurrency: 1)
+        let log = AttemptLog()
+        let policy = try RetryPolicy(maximumAttempts: 3)
+
+        // Act
+        let results = try await processor.process(
+            [Job(id: "always-fails", input: 1)],
+            retryPolicy: policy
+        ) { job, attempt in
+            await log.record(job, attempt: attempt)
+            throw StudentWorkerError.boom
+        }
+
+        // Assert
+        let attempts = await log.attempts(for: "always-fails")
+        XCTAssertEqual(attempts, [1, 2, 3])
+        XCTAssertEqual(results, [JobResult(id: "always-fails", outcome: .failed)])
+    }
+
+    func testRetryRecoversBeforeLimitAndStopsRetrying() async throws {
+        // Arrange
+        let processor = try TaskProcessor(maximumConcurrency: 2)
+        let log = AttemptLog()
+        let policy = try RetryPolicy(maximumAttempts: 5)
+        let jobs = [Job(id: "flaky", input: 10), Job(id: "steady", input: 20)]
+
+        // Act
+        let results = try await processor.process(jobs, retryPolicy: policy) { job, attempt in
+            await log.record(job, attempt: attempt)
+            if job.id == "flaky" && attempt < 3 {
+                throw StudentWorkerError.boom
+            }
+            return job.input + attempt
+        }
+
+        // Assert
+        let flakyAttempts = await log.attempts(for: "flaky")
+        let steadyAttempts = await log.attempts(for: "steady")
+        XCTAssertEqual(flakyAttempts, [1, 2, 3])
+        XCTAssertEqual(steadyAttempts, [1])
+        XCTAssertEqual(
+            results,
+            [
+                JobResult(id: "flaky", outcome: .succeeded(13)),
+                JobResult(id: "steady", outcome: .succeeded(21))
+            ]
+        )
+    }
+
+    func testRetryNeverRetriesCancellationError() async throws {
+        // Arrange
+        let processor = try TaskProcessor(maximumConcurrency: 1)
+        let log = AttemptLog()
+        let policy = try RetryPolicy(maximumAttempts: 4)
+
+        // Act
+        let results = try await processor.process(
+            [Job(id: "cancels", input: 1), Job(id: "after", input: 2)],
+            retryPolicy: policy
+        ) { job, attempt in
+            await log.record(job, attempt: attempt)
+            if job.id == "cancels" {
+                throw CancellationError()
+            }
+            return job.input
+        }
+
+        // Assert
+        let attempts = await log.attempts(for: "cancels")
+        XCTAssertEqual(attempts, [1])
+        XCTAssertEqual(
+            results,
+            [
+                JobResult(id: "cancels", outcome: .cancelled),
+                JobResult(id: "after", outcome: .succeeded(2))
+            ]
+        )
+    }
+
+    func testRetryKeepsJobInItsSlotAndPreservesLimit() async throws {
+        // Arrange
+        let processor = try TaskProcessor(maximumConcurrency: 1)
+        let log = AttemptLog()
+        let counter = ActiveCounter()
+        let policy = try RetryPolicy(maximumAttempts: 2)
+        let jobs = [Job(id: "a", input: 1), Job(id: "b", input: 2)]
+
+        // Act
+        let results = try await processor.process(jobs, retryPolicy: policy) { job, attempt in
+            await counter.enter()
+            await log.record(job, attempt: attempt)
+            await Task.yield()
+            await counter.exit()
+            if job.id == "a" && attempt == 1 {
+                throw StudentWorkerError.boom
+            }
+            return job.input
+        }
+
+        // Assert: b must not start between a's first and second attempt.
+        let entries = await log.entries
+        XCTAssertEqual(entries, ["a#1", "a#2", "b#1"])
+        let peak = await counter.peak
+        XCTAssertEqual(peak, 1)
+        XCTAssertEqual(
+            results,
+            [
+                JobResult(id: "a", outcome: .succeeded(1)),
+                JobResult(id: "b", outcome: .succeeded(2))
+            ]
+        )
+    }
+
+    func testRetryResultsKeepInputOrderWhenRetriesFinishOutOfOrder() async throws {
+        // Arrange
+        let processor = try TaskProcessor(maximumConcurrency: 3)
+        let gate = StartGate()
+        let policy = try RetryPolicy(maximumAttempts: 2)
+        let jobs = [
+            Job(id: "a", input: 1),
+            Job(id: "b", input: 2),
+            Job(id: "c", input: 3)
+        ]
+
+        // Act
+        let processing = Task {
+            try await processor.process(jobs, retryPolicy: policy) { job, attempt in
+                if attempt == 1 {
+                    await gate.enter(job.id)
+                    throw StudentWorkerError.boom
+                }
+                return job.input * 10
+            }
+        }
+        await gate.waitUntilStarted("a")
+        await gate.waitUntilStarted("b")
+        await gate.waitUntilStarted("c")
+        await gate.open("c")
+        await gate.open("b")
+        await gate.open("a")
+        let results = try await processing.value
+
+        // Assert
+        XCTAssertEqual(
+            results,
+            [
+                JobResult(id: "a", outcome: .succeeded(10)),
+                JobResult(id: "b", outcome: .succeeded(20)),
+                JobResult(id: "c", outcome: .succeeded(30))
+            ]
+        )
+    }
+
+    func testRetryDuplicateIDThrowsBeforeAnyAttempt() async throws {
+        // Arrange
+        let processor = try TaskProcessor(maximumConcurrency: 2)
+        let log = AttemptLog()
+        let policy = try RetryPolicy(maximumAttempts: 3)
+        let jobs = [Job(id: "x", input: 1), Job(id: "y", input: 2), Job(id: "x", input: 3)]
+
+        // Act
+        var thrownError: Error?
+        do {
+            _ = try await processor.process(jobs, retryPolicy: policy) { job, attempt in
+                await log.record(job, attempt: attempt)
+                return job.input
+            }
+        } catch {
+            thrownError = error
+        }
+
+        // Assert
+        XCTAssertEqual(thrownError as? TaskProcessorError, .duplicateID("x"))
+        let entries = await log.entries
+        XCTAssertEqual(entries, [])
+    }
+
+    func testRetryCallerCancellationCancelsQueuedJobs() async throws {
+        // Arrange
+        let processor = try TaskProcessor(maximumConcurrency: 1)
+        let gate = StartGate()
+        let policy = try RetryPolicy(maximumAttempts: 3)
+        let jobs = [Job(id: "running", input: 1), Job(id: "queued", input: 2)]
+
+        // Act
+        let processing = Task {
+            try await processor.process(jobs, retryPolicy: policy) { job, _ in
+                await gate.enter(job.id)
+                try Task.checkCancellation()
+                return job.input
+            }
+        }
+        await gate.waitUntilStarted("running")
+        processing.cancel()
+        await gate.open("running")
+        let results = try await processing.value
+
+        // Assert
+        let startedIDs = await gate.startedIDs
+        XCTAssertEqual(startedIDs, ["running"])
+        XCTAssertEqual(
+            results,
+            [
+                JobResult(id: "running", outcome: .cancelled),
+                JobResult(id: "queued", outcome: .cancelled)
             ]
         )
     }

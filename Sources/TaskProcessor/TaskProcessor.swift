@@ -43,6 +43,17 @@ public actor TaskProcessor {
         _ jobs: [Job],
         worker: @escaping @Sendable (Job) async throws -> Int
     ) async throws -> [JobResult] {
+        try await schedule(jobs) { job in
+            await Self.run(job, with: worker)
+        }
+    }
+
+    /// Shared scheduling: validation, bounded concurrency, input-order results
+    /// and cancellation. `execute` produces the final outcome of one job.
+    fileprivate func schedule(
+        _ jobs: [Job],
+        execute: @escaping @Sendable (Job) async -> JobOutcome
+    ) async throws -> [JobResult] {
         var seenIDs = Set<String>()
         for job in jobs {
             if !seenIDs.insert(job.id).inserted {
@@ -71,7 +82,7 @@ public actor TaskProcessor {
                     let index = nextIndex
                     let job = jobs[index]
                     group.addTask {
-                        (index, await Self.run(job, with: worker))
+                        (index, await execute(job))
                     }
                     nextIndex += 1
                     active += 1
@@ -100,6 +111,48 @@ public actor TaskProcessor {
         } catch is CancellationError {
             return .cancelled
         } catch {
+            return .failed
+        }
+    }
+}
+
+public struct RetryPolicy: Sendable, Equatable {
+    public let maximumAttempts: Int
+
+    public init(maximumAttempts: Int) throws {
+        guard maximumAttempts > 0 else {
+            throw RetryPolicyError.nonPositiveMaximumAttempts
+        }
+        self.maximumAttempts = maximumAttempts
+    }
+}
+
+public enum RetryPolicyError: Error, Equatable {
+    case nonPositiveMaximumAttempts
+}
+
+public extension TaskProcessor {
+    func process(
+        _ jobs: [Job],
+        retryPolicy: RetryPolicy,
+        worker: @escaping @Sendable (Job, Int) async throws -> Int
+    ) async throws -> [JobResult] {
+        let maximumAttempts = retryPolicy.maximumAttempts
+        return try await schedule(jobs) { job in
+            // Attempts run one after another inside the job's single slot.
+            for attempt in 1...maximumAttempts {
+                // A retry is a new worker start, so it is not allowed once cancelled.
+                if Task.isCancelled && attempt > 1 {
+                    return .cancelled
+                }
+                do {
+                    return .succeeded(try await worker(job, attempt))
+                } catch is CancellationError {
+                    return .cancelled
+                } catch {
+                    continue
+                }
+            }
             return .failed
         }
     }
