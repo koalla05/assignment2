@@ -11,9 +11,20 @@ Do not paste secrets or an unreviewed raw transcript.
 | 2026-10-16 | Claude Code (Claude Sonnet 5.5) | Implemented `process`: duplicate-ID preflight, `withTaskGroup` with a next-index counter and active count, indexed `outcomes` array, a `run` helper mapping outcomes, and cancellation checks via `Task.isCancelled`. | Accepted after asking about `Set.insert(...).inserted`, `Array(repeating:count:)`, `?? .cancelled` (nil only means the job never started; a worker `CancellationError` is stored explicitly) and why `while true` terminates. Cancellation and concurrency-limit behavior are not yet covered by tests. | `swift test`: 5 starter tests pass. |
 | 2026-10-17 | Claude Code (Claude Sonnet 5.5) | Checked my new `TaskProcessorStudentTests.swift` against TASKS_AND_GRADES.md and the starter tests. | Accepted: the 5 starter tests in `TaskProcessorPublicTests.swift` are unchanged (no diff against the initial commit), and I have 9 distinct student tests covering all five graded categories. | `git diff`, `swift test`: 14 tests pass. |
 | 2026-10-17 | Claude Code (Claude Sonnet 5.5) | Pointed out that my peak-concurrency test only asserts `peak <= limit`, so a processor that runs one job at a time would pass. Added `testProcessorFillsAllSlotsButNoMore`. | Accepted. It found a flaw in the test, not in the processor: I first asserted the exact start order `job1, job2, job3`, but concurrent workers enter in any order, and it failed in about 1 of 10 runs. I now compare the started jobs as a set and check the count equals the limit. | 200 repeated runs of `swift test --skip-build` with no failures. |
-| 2026-10-17 | Claude Code (Claude Sonnet 5.5) | Implemented the optional retry extension: `RetryPolicy`, `RetryPolicyError`, the retry `process` overload, and a refactor of the scheduling loop into a shared private `schedule` helper. Added 7 retry tests. | Accepted after reading the diff. The base `process` behaves as before and the retry overload reuses the same loop. Decision for an unlisted case: once the caller has cancelled, a retry is not started and the job is `.cancelled`; I chose this because the base rules say no new worker starts after cancellation. | `swift test`: 23 tests pass, 100 repeated runs with no failures. |
+| 2026-10-17 | Claude Code (Claude Sonnet 5.5) | Implemented the optional retry extension: `RetryPolicy`, `RetryPolicyError`, the retry `process` overload, and a refactor of the scheduling loop into a shared private `schedule` helper. Added 8 retry tests. | Accepted after reading the diff. The base `process` behaves as before and the retry overload reuses the same loop. Decision for an unlisted case: once the caller has cancelled, a retry is not started and the job is `.cancelled`; I chose this because the base rules say no new worker starts after cancellation. | `swift test`: 23 tests pass, 100 repeated runs with no failures. |
 
 ## Final review
 
-<!-- Fill in after implementation: summarize remaining risks and confirm that
-you inspected the final diff. -->
+I inspected the final diff of `TaskProcessor.swift`, the student tests, `PLAN.md`
+and this worklog before submitting. `swift test` passes all 23 tests (5 starter,
+18 student) from a clean build with no warnings, and repeated runs showed no
+flaky tests after I fixed the start-order assertion in my own test.
+
+Remaining risks:
+- My cancellation tests cover the cases the spec describes (cooperative workers
+  and never-started jobs). They do not cover workers that ignore cancellation,
+  which the spec leaves out.
+
+Agent output I used was reviewed and understood; where it was wrong or unclear
+(the `<= 0` check in `init`, my flaky start-order assertion) I fixed or
+questioned it rather than accepting it as written.

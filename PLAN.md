@@ -56,6 +56,27 @@ retried until the last attempt, then `.failed`. `CancellationError` returns
 - [x] Add at least six distinct student-authored tests and run `swift test`.
 - [x] Bonus: `RetryPolicy`, `RetryPolicyError` and the retry `process` overload, with tests.
 
+## Test strategy
+
+Student tests live in `Tests/TaskProcessorTests/TaskProcessorStudentTests.swift`
+and leave the starter file untouched. They are deterministic: no sleeps and no
+timing assertions. Small test-only actors provide the control:
+
+- `StartGate` records which jobs started and holds each one until the test
+  opens it, which gives controlled out-of-order completion and lets a test
+  cancel while work is in flight.
+- `ActiveCounter` tracks current and peak active workers.
+- `InvocationLog` and `AttemptLog` record worker calls and attempt numbers.
+
+Concurrent workers enter in any order, so tests compare started IDs as a set
+unless the concurrency limit is 1.
+
+## Status
+
+All milestones are done. `swift test` passes (5 starter tests, 18 student tests:
+10 base and 8 retry). Remaining known limits are the contract's non-goals:
+workers that ignore cancellation and overlapping calls on one processor.
+
 ## Risks and checks
 
 | Risk / edge case | How I will test it |
