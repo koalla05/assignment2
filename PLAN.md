@@ -11,8 +11,9 @@ appeared, before any worker runs. Empty input returns `[]`.
 
 **Bounded scheduling.** Jobs are already ordered in the input array, so no
 separate queue is needed: a `nextIndex` counter picks the next unstarted job
-left to right. Inside `withThrowingTaskGroup`, I start up to
-`maximumConcurrency` child tasks. Each time one finishes, a slot is free and
+left to right. Inside a task group, I start up to
+`maximumConcurrency` child tasks (a non-throwing `withTaskGroup`, because the
+worker's errors are caught inside each child task). Each time one finishes, a slot is free and
 I start the job at `nextIndex`. Active child tasks therefore never exceed the
 limit.
 
@@ -21,7 +22,7 @@ are written into an array sized to `jobs.count` at that index, so completion
 order does not affect output order. The final array is built in input order
 with the same IDs as `jobs`.
 
-**Outcome mapping.** The worker may throw any error. Ii is  catched in the child
+**Outcome mapping.** The worker may throw any error. It is caught in the child
 task:
 - returns `n` -> `.succeeded(n)`
 - throws `CancellationError` -> `.cancelled`
@@ -35,11 +36,11 @@ outcome. Cooperative workers that throw `CancellationError` are `.cancelled`.
 
 ## Milestones
 
-- [ ] Validate configuration and all job IDs before starting work.
-- [ ] Schedule jobs within the concurrency limit and preserve input order.
-- [ ] Map success, ordinary errors, and cancellation outcomes.
-- [ ] Handle caller cancellation and never-started jobs.
-- [ ] Add at least six distinct student-authored tests and run `swift test`.
+- [x] Validate configuration and all job IDs before starting work.
+- [x] Schedule jobs within the concurrency limit and preserve input order.
+- [x] Map success, ordinary errors, and cancellation outcomes.
+- [x] Handle caller cancellation and never-started jobs.
+- [x] Add at least six distinct student-authored tests and run `swift test`.
 
 ## Risks and checks
 
@@ -47,6 +48,7 @@ outcome. Cooperative workers that throw `CancellationError` are `.cancelled`.
 | --- | --- |
 | Duplicate ID is not the *first* repeated one, or a worker starts before validation | Jobs like `a, b, b, a` expect `.duplicateID("b")`; a worker that records invocations must record none. |
 | Active workers exceed the limit | A counter actor tracks current and peak active count across many jobs; assert peak `<= N`. |
+| Processor under-uses the limit (e.g. runs one job at a time) | Gate `N` jobs out of `2N`; wait until `N` have started, assert exactly `N` started and peak `== N`. Compare started IDs as a set, since concurrent workers enter in any order. |
 | A freed slot is not reused | Gate the first jobs, release one, and assert the next unstarted job begins. |
 | Results returned in completion order | Release gates in reverse order and assert output order equals input order. |
 | `CancellationError` treated as `.failed`, or an ordinary error stops other jobs | Mix success, ordinary error and `CancellationError` workers; assert each outcome and that later jobs still run. |
